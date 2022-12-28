@@ -4,20 +4,21 @@ import com.google.protobuf.DescriptorProtos
 import com.google.protobuf.Descriptors
 import com.google.protobuf.DynamicMessage
 import com.google.protobuf.TextFormat
-import io.ktor.application.*
 import io.ktor.http.*
-import io.ktor.response.*
-import io.ktor.routing.*
+import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
 import java.io.File
 import java.util.*
 
-fun main(args: Array<String>) {
-    if (args.isEmpty()) {
-        printHelp()
-        return
-    }
+fun main() {
+    val args = arrayListOf(
+        "-m", "bidmachine.protobuf.openrtb.Openrtb",
+        "-f", "bidmachine.protobuf.openrtb.Openrtb.json",
+        "-d", "bidmachine.desc", "google.desc"
+    )
 
     args.fold(Pair(emptyMap<String, List<String>>(), "")) { (map, lastKey), elem ->
         if (elem.startsWith("-")) {
@@ -30,14 +31,14 @@ fun main(args: Array<String>) {
     }
 }
 
-fun printHelp() {
+private fun printHelp() {
     println("Usage: -p <port> (optional, default 8080) -m <Protobuf message full type name> -f <file> -d <Descriptor file 1> .. <Descriptor file N>")
 }
 
-fun startMockServer(messageTypeNames: List<String>?,
-                    files: List<String>?,
-                    descriptorFiles: List<String>?,
-                    ports: List<String>?) {
+private fun startMockServer(messageTypeNames: List<String>?,
+                            files: List<String>?,
+                            descriptorFiles: List<String>?,
+                            ports: List<String>?) {
     val messageTypeName = messageTypeNames?.first()
     val file = files?.first()
     if (messageTypeName == null || file == null || descriptorFiles.isNullOrEmpty()) {
@@ -51,7 +52,8 @@ fun startMockServer(messageTypeNames: List<String>?,
     }
 
     descriptorFiles.map { descriptorFile ->
-        DescriptorProtos.FileDescriptorSet.parseFrom(File(descriptorFile).readBytes())
+        val descriptorFileBytes = object {}.javaClass.getResource("/$descriptorFile")?.readBytes()
+        DescriptorProtos.FileDescriptorSet.parseFrom(descriptorFileBytes)
     }.let { fileDescSets ->
         getFileDescriptorProtos(fileDescSets)
     }.let { map ->
@@ -61,7 +63,7 @@ fun startMockServer(messageTypeNames: List<String>?,
     }
 }
 
-fun createResponse(text: String, descriptor: Descriptors.Descriptor?): DynamicMessage {
+private fun createResponse(text: String, descriptor: Descriptors.Descriptor?): DynamicMessage {
     return DynamicMessage.newBuilder(descriptor).let { dynamicMessageBuilder ->
         processResponseTemplate(text).let { result ->
             TextFormat.getParser().merge(result, dynamicMessageBuilder)
@@ -70,36 +72,42 @@ fun createResponse(text: String, descriptor: Descriptors.Descriptor?): DynamicMe
     }
 }
 
-fun processResponseTemplate(template: String): String {
+private fun processResponseTemplate(template: String): String {
     return template.replace("<BID_ID>", UUID.randomUUID().toString())
 }
 
-fun startServer(text: String, descriptor: Descriptors.Descriptor?, ports: List<String>?) {
-    val port = ports?.first()?.toInt() ?: 8080
-    embeddedServer(Netty, port) {
-        routing {
-            post("/") {
-                val response = createResponse(text, descriptor)
-                call.respondBytes(response.toByteArray(),
-                                  ContentType("application",
-                                              "x-protobuf; messageType=\"${response.descriptorForType.fullName}\"",
-                                              emptyList()),
-                                  HttpStatusCode.OK)
+private fun startServer(text: String, descriptor: Descriptors.Descriptor?, ports: List<String>?) {
+    val environment = applicationEngineEnvironment {
+        connector {
+            host = "127.0.0.1"
+            port = ports?.first()?.toInt() ?: 8080
+        }
+        module {
+            routing {
+                post("/") {
+                    val response = createResponse(text, descriptor)
+                    call.respondBytes(response.toByteArray(),
+                                      ContentType("application",
+                                                  "x-protobuf; messageType=\"${response.descriptorForType.fullName}\"",
+                                                  emptyList()),
+                                      HttpStatusCode.OK)
+                }
             }
         }
-    }.start(wait = true)
+    }
+    embeddedServer(Netty, environment).start(wait = true)
 }
 
-fun getFileDescriptorProtos(fileDescSets: List<DescriptorProtos.FileDescriptorSet>) =
+private fun getFileDescriptorProtos(fileDescSets: List<DescriptorProtos.FileDescriptorSet>) =
     fileDescSets.flatMap { fileDescSet ->
         fileDescSet.fileList.map { fileDescProto -> fileDescProto }
     }.map { fileDescProto ->
         getProtoFileName(fileDescProto.name) to fileDescProto
     }.toMap()
 
-fun getProtoFileName(fullPath: String): String = fullPath.split("/").last()
+private fun getProtoFileName(fullPath: String): String = fullPath.split("/").last()
 
-fun createMessageDescriptor(messageTypeName: String,
+private fun createMessageDescriptor(messageTypeName: String,
                             map: Map<String, DescriptorProtos.FileDescriptorProto>,
                             parentMessageDescriptor: Descriptors.Descriptor? = null): Descriptors.Descriptor? {
     val fileDescriptorProto = getProtoFileForMessage(messageTypeName, map)
@@ -113,13 +121,13 @@ fun createMessageDescriptor(messageTypeName: String,
         ?: findMessageDescriptorInHierarchy(messageTypeName, parentMessageDescriptor)
 }
 
-fun getProtoFileForMessage(messageTypeName: String,
+private fun getProtoFileForMessage(messageTypeName: String,
                            map: Map<String, DescriptorProtos.FileDescriptorProto>): DescriptorProtos.FileDescriptorProto? =
     map.values.firstOrNull { fileDescriptorProto ->
         messageInList(fileDescriptorProto.messageTypeList, fileDescriptorProto.`package`, messageTypeName)
     }
 
-fun messageInList(messageTypeList: List<DescriptorProtos.DescriptorProto>,
+private fun messageInList(messageTypeList: List<DescriptorProtos.DescriptorProto>,
                   packageName: String,
                   messageTypeName: String): Boolean {
     return messageTypeList.any {
@@ -129,7 +137,7 @@ fun messageInList(messageTypeList: List<DescriptorProtos.DescriptorProto>,
     }
 }
 
-fun getDependencies(fileDescProtoMap: Map<String, DescriptorProtos.FileDescriptorProto>,
+private fun getDependencies(fileDescProtoMap: Map<String, DescriptorProtos.FileDescriptorProto>,
                     fileDescProto: DescriptorProtos.FileDescriptorProto): Array<Descriptors.FileDescriptor> =
     fileDescProto.dependencyList.filter {
         fileDescProtoMap.containsKey(getProtoFileName(it))
@@ -139,14 +147,14 @@ fun getDependencies(fileDescProtoMap: Map<String, DescriptorProtos.FileDescripto
                                                              fileDescProtoMap[getProtoFileName(it)]!!))
     }.toTypedArray()
 
-fun findMessageDescriptorInHierarchy(messageTypeName: String,
+private fun findMessageDescriptorInHierarchy(messageTypeName: String,
                                      parent: Descriptors.Descriptor?): Descriptors.Descriptor? =
     parent?.findNestedTypeByName(messageTypeName)
         ?: findMessageDescriptorInHierarchy(messageTypeName, parent?.containingType)
 
 // EXTENSIONS
 
-fun Descriptors.FileDescriptor.findMessageTypeByNameOrFullName(name: String): Descriptors.Descriptor? {
+private fun Descriptors.FileDescriptor.findMessageTypeByNameOrFullName(name: String): Descriptors.Descriptor? {
     return this.findMessageTypeByName(name)
         ?: this.findMessageTypeByName(name.replace("${this.`package`}.", ""))
 }
